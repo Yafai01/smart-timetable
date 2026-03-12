@@ -1,0 +1,5 @@
+{
+  "name": "Smart Timetable Pro",
+  "description": "An automated, conflict-free college timetable generator with faculty and room management.",
+  "requestFramePermissions": []
+}
