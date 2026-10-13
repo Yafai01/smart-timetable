@@ -1,12 +1,22 @@
+# dependencies
 node_modules/
-build/
+
+# build output
 dist/
+build/
 coverage/
-.DS_Store
-*.log
+
+# local database (created and seeded automatically on first run)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+uploads/
+
+# environment
 .env*
 !.env.example
 
-# SQLite database and CSV upload temp files (created at runtime)
-*.db
-uploads/
+# misc
+.DS_Store
+*.log
