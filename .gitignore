@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# SQLite database and CSV upload temp files (created at runtime)
+*.db
+uploads/
