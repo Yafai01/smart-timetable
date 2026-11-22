@@ -38,6 +38,7 @@ You enter (or import from CSV) the departments, teachers, subjects, classes and 
 
 ```
 server.ts            Entry point: env config, Vite dev middleware or static client build
+api/index.ts         Vercel serverless entry point (wraps the same Express app)
 server/
   app.ts             Express app and REST API (validation, CRUD, CSV import, generation)
   db.ts              SQLite schema, first-run initialisation and sample data
@@ -51,7 +52,7 @@ tests/               Scheduler and API tests
 
 ## Prerequisites
 
-- Node.js 20 or newer
+- Node.js 24 (pinned in `package.json`; `better-sqlite3` does not support Node 26 yet)
 - npm
 
 `better-sqlite3` ships prebuilt binaries for common platforms. On other platforms it needs a C/C++ toolchain to compile.
@@ -112,3 +113,11 @@ npm start
 ```
 
 The database is a single SQLite file. Point `DATABASE_PATH` at persistent storage, such as a mounted disk, because ephemeral container file systems lose data on redeploy.
+
+### Vercel
+
+Live demo: https://smart-timetable-brown.vercel.app
+
+`vercel.json` builds the client with `vite build`, serves `dist/client` as static files and sends every `/api/*` request to `api/index.ts`, which wraps the same Express app. Pushes to `main` deploy to production automatically.
+
+Vercel functions have a read-only file system, so the database is created in the OS temp directory and filled with sample data. **That data is not persistent.** It resets when a function instance starts cold, and separate instances do not share it. This is fine for a demo. For real use, deploy to a host with a persistent disk (see above) or move the database to a hosted service.
