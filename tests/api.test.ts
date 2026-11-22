@@ -157,8 +157,37 @@ describe("generate", () => {
     expect(res.body.count).toBe(4 + 3 + 2 + 4);
     expect(res.body.conflicts).toEqual([]);
     const d = await data();
-    expect(d.settings).toEqual({ workingDays: ["Monday", "Tuesday", "Wednesday"], periodsPerDay: 4 });
+    expect(d.settings).toEqual({ workingDays: ["Monday", "Tuesday", "Wednesday"], periodsPerDay: 4, startTime: "09:00", periodMinutes: 60 });
     expect(d.last_generated_at).toBeTruthy();
+  });
+
+  it("links conflicts to the timetable entries involved", async () => {
+    await request(app).post("/api/generate").send({}).expect(200);
+    await request(app).put("/api/rooms/1").send({ name: "Room 101", capacity: 10, is_lab: false }).expect(200);
+    const d = await data();
+    const capacity = d.conflicts.filter((c: { type: string }) => c.type === "Capacity conflict");
+    expect(capacity.length).toBeGreaterThan(0);
+    const ids = new Set(d.timetable.map((t: { id: number }) => t.id));
+    for (const c of capacity) {
+      expect(c.entry_ids).toHaveLength(1);
+      expect(ids.has(c.entry_ids[0])).toBe(true);
+    }
+  });
+
+  it("saves period clock times without regenerating, and keeps them across generations", async () => {
+    await request(app).post("/api/generate").send({}).expect(200);
+    const before = (await data()).timetable.length;
+    const res = await request(app).put("/api/settings").send({ startTime: "08:30", periodMinutes: 50 }).expect(200);
+    expect(res.body).toMatchObject({ startTime: "08:30", periodMinutes: 50 });
+    expect((await data()).timetable.length).toBe(before);
+    await request(app).post("/api/generate").send({ periodsPerDay: 5 }).expect(200);
+    expect((await data()).settings).toMatchObject({ startTime: "08:30", periodMinutes: 50, periodsPerDay: 5 });
+  });
+
+  it("validates period clock times", async () => {
+    await request(app).put("/api/settings").send({ startTime: "25:00" }).expect(400);
+    await request(app).put("/api/settings").send({ periodMinutes: 5 }).expect(400);
+    await request(app).put("/api/settings").send({ startTime: "22:00", periodMinutes: 120 }).expect(400);
   });
 
   it("rejects invalid settings", async () => {

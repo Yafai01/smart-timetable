@@ -199,10 +199,17 @@ export function createApp(db: DB) {
       availability: d.faculty_availability,
     });
 
-  const settings = async () => {
+  const DEFAULT_SETTINGS = { workingDays: [...ALL_DAYS] as string[], periodsPerDay: 6, startTime: "09:00", periodMinutes: 60 };
+  type Settings = typeof DEFAULT_SETTINGS;
+  const settings = async (): Promise<Settings> => {
     const stored = await getMeta("schedule_settings");
-    const fallback = { workingDays: [...ALL_DAYS], periodsPerDay: 6 };
-    return stored ? (JSON.parse(stored) as typeof fallback) : fallback;
+    // Older rows lack the clock-time fields; fill them from the defaults.
+    return { ...DEFAULT_SETTINGS, ...(stored ? (JSON.parse(stored) as Partial<Settings>) : {}) };
+  };
+  const startTime = (body: Body) => {
+    const v = body.startTime;
+    if (typeof v !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) throw new HttpError(400, "Start time must be in HH:MM format.");
+    return v;
   };
 
   // ---------- read ----------
@@ -427,6 +434,23 @@ export function createApp(db: DB) {
 
   // ---------- scheduling ----------
 
+  /** Display-only clock times. Changing them does not require regenerating. */
+  app.put(
+    "/api/settings",
+    route(async (req, res) => {
+      const body = req.body ?? {};
+      const next = { ...(await settings()) };
+      if (body.startTime !== undefined) next.startTime = startTime(body);
+      if (body.periodMinutes !== undefined) next.periodMinutes = int(body, "periodMinutes", "Period length", 10, 240);
+      const [h, m] = next.startTime.split(":").map(Number);
+      if (h * 60 + m + next.periodsPerDay * next.periodMinutes > 24 * 60) {
+        throw new HttpError(400, "The school day must end before midnight.");
+      }
+      await db.batch([setMeta("schedule_settings", JSON.stringify(next))]);
+      res.json(next);
+    }),
+  );
+
   app.post(
     "/api/generate",
     route(async (req, res) => {
@@ -464,7 +488,7 @@ export function createApp(db: DB) {
           sql: "INSERT INTO timetable_entries (class_id, subject_id, faculty_id, room_id, day, period) VALUES (?, ?, ?, ?, ?, ?)",
           args: [e.class_id, e.subject_id, e.faculty_id, e.room_id, e.day, e.period],
         })),
-        setMeta("schedule_settings", JSON.stringify({ workingDays: days, periodsPerDay })),
+        setMeta("schedule_settings", JSON.stringify({ ...current, workingDays: days, periodsPerDay })),
         setMeta("last_generated_at", new Date().toISOString()),
       ]);
 

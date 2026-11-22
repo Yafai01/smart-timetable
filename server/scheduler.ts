@@ -7,10 +7,18 @@ export interface ClassGroup { id: number; name: string; dept_id: number | null; 
 export interface Room { id: number; name: string; capacity: number; is_lab: number | boolean }
 export interface FacultySubject { faculty_id: number; subject_id: number }
 export interface Availability { faculty_id: number; day: string; period: number; is_available: number | boolean }
-export interface Entry { class_id: number; subject_id: number; faculty_id: number; room_id: number; day: string; period: number }
+export interface Entry { id?: number; class_id: number; subject_id: number; faculty_id: number; room_id: number; day: string; period: number }
 
 export type Severity = "high" | "medium";
-export interface Conflict { type: string; message: string; severity: Severity }
+export interface Conflict {
+  type: string;
+  message: string;
+  severity: Severity;
+  /** Timetable entries involved, when the conflict is about specific periods. */
+  entry_ids?: number[];
+  /** Class concerned, for requirement-level conflicts. */
+  class_id?: number;
+}
 
 export interface Unscheduled {
   class_id: number;
@@ -128,6 +136,10 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
   const name = (m: Map<number, { name: string }>, id: number) => m.get(id)?.name ?? `#${id}`;
   const busy = unavailableSet(input.availability);
   const conflicts: Conflict[] = [];
+  const ids = (...es: Entry[]) => {
+    const list = es.map((x) => x.id).filter((id): id is number => id !== undefined);
+    return list.length ? { entry_ids: list } : {};
+  };
 
   const facultySeen = new Map<string, Entry>();
   const roomSeen = new Map<string, Entry>();
@@ -143,6 +155,7 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
         type: "Faculty double booking",
         severity: "high",
         message: `${name(faculty, e.faculty_id)} is scheduled for both ${name(classes, fOther.class_id)} and ${name(classes, e.class_id)} on ${when}.`,
+        ...ids(fOther, e),
       });
     } else facultySeen.set(fKey, e);
 
@@ -153,6 +166,7 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
         type: "Room double booking",
         severity: "high",
         message: `${name(rooms, e.room_id)} is booked by both ${name(classes, rOther.class_id)} and ${name(classes, e.class_id)} on ${when}.`,
+        ...ids(rOther, e),
       });
     } else roomSeen.set(rKey, e);
 
@@ -163,6 +177,7 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
         type: "Class double booking",
         severity: "high",
         message: `${name(classes, e.class_id)} has both ${name(subjects, cOther.subject_id)} and ${name(subjects, e.subject_id)} on ${when}.`,
+        ...ids(cOther, e),
       });
     } else classSeen.set(cKey, e);
 
@@ -171,6 +186,7 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
         type: "Faculty unavailable",
         severity: "high",
         message: `${name(faculty, e.faculty_id)} is marked unavailable on ${when} but is scheduled to teach ${name(classes, e.class_id)}.`,
+        ...ids(e),
       });
     }
 
@@ -182,6 +198,7 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
         type: "Capacity conflict",
         severity: "medium",
         message: `${room.name} (capacity ${room.capacity}) is too small for ${cls.name} (${cls.student_count} students) on ${when}.`,
+        ...ids(e),
       });
     }
     if (room && sub && Boolean(room.is_lab) !== Boolean(sub.is_lab)) {
@@ -189,6 +206,7 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
         type: "Room type mismatch",
         severity: "medium",
         message: `${sub.name} is a ${sub.is_lab ? "lab" : "theory"} subject but is scheduled in ${room.name} on ${when}.`,
+        ...ids(e),
       });
     }
   }
@@ -201,6 +219,7 @@ export function detectConflicts(input: ConflictInput): Conflict[] {
           type: "Unmet requirement",
           severity: "medium",
           message: `${cls.name}: ${sub.name} needs ${sub.periods_per_week} periods per week, ${scheduled} scheduled.`,
+          class_id: cls.id,
         });
       }
     }
