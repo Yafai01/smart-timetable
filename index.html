@@ -3,12 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Smart Timetable</title>
-    <meta name="description" content="Conflict-free college timetable generator." />
+    <title>Smart Timetable — conflict-free college scheduling</title>
+    <meta
+      name="description"
+      content="Build conflict-free weekly college timetables from your faculty, subjects, classes and rooms. Respects availability and room capacity, flags clashes, and exports to PDF, CSV and calendar."
+    />
+    <meta name="theme-color" content="#ffffff" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Smart Timetable" />
+    <meta property="og:description" content="Conflict-free weekly college timetables with availability, capacity and clash detection." />
+    <meta name="twitter:card" content="summary" />
+    <script>
+      // Apply the saved theme before first paint to avoid a light/dark flash.
+      (function () {
+        var pref = null;
+        try { pref = localStorage.getItem('smart-timetable:theme'); } catch (e) {}
+        var dark = pref === 'dark' || (pref !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.querySelector('meta[name="theme-color"]').setAttribute('content', dark ? '#16161a' : '#ffffff');
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

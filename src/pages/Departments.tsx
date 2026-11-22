@@ -1,55 +1,56 @@
 import { useEffect, useState } from 'react';
-import { Building2 } from 'lucide-react';
+import { Building2, Plus } from 'lucide-react';
 import type { AppData, Department } from '../types';
-import { Button, Card, CsvImport, DataTable, EmptyState, Field, RowActions, TextInput } from '../ui';
+import { Button, Card, CsvImport, DataTable, Drawer, EmptyState, Field, PageHeader, RowActions, TextInput } from '../ui';
 import { useEntityEditor } from '../useEntityEditor';
 
 export default function Departments({ data, refresh }: { data: AppData; refresh: () => Promise<void> }) {
   const editor = useEntityEditor<Department>('departments', 'Department', refresh);
   const [name, setName] = useState('');
 
-  useEffect(() => setName(editor.editing?.name ?? ''), [editor.editing]);
+  useEffect(() => {
+    if (editor.open) setName(editor.editing?.name ?? '');
+  }, [editor.open, editor.editing]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (await editor.save({ name })) setName('');
+    await editor.save({ name });
   };
 
   const count = (key: 'faculty' | 'classes' | 'subjects', id: number) => data[key].filter((x) => x.dept_id === id).length;
+  const add = (
+    <Button variant="primary" icon={<Plus size={15} aria-hidden />} onClick={editor.openNew}>
+      Add department
+    </Button>
+  );
 
   return (
-    <div className="space-y-6">
-      <Card
-        title={editor.editing ? `Edit ${editor.editing.name}` : 'Add department'}
-        actions={!editor.editing && <CsvImport type="departments" columns="name" onDone={refresh} />}
-      >
-        <form onSubmit={submit} className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-end">
-          <Field label="Department name">
-            {(id) => <TextInput id={id} value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} />}
-          </Field>
-          <div className="flex gap-2">
-            {editor.editing && <Button onClick={() => editor.setEditing(null)}>Cancel</Button>}
-            <Button type="submit" variant="primary" busy={editor.saving}>
-              {editor.editing ? 'Save changes' : 'Add department'}
-            </Button>
-          </div>
-        </form>
-      </Card>
+    <div className="space-y-4">
+      <PageHeader
+        title="All departments"
+        description={`${data.departments.length} ${data.departments.length === 1 ? 'department' : 'departments'}`}
+        actions={
+          <>
+            <CsvImport type="departments" columns="name" onDone={refresh} />
+            {add}
+          </>
+        }
+      />
 
-      <Card title="Departments" description={`${data.departments.length} total`}>
+      <Card flush>
         {data.departments.length === 0 ? (
-          <EmptyState icon={<Building2 size={20} aria-hidden />} title="No departments yet">
-            Add a department above or import a CSV file.
+          <EmptyState icon={<Building2 size={18} aria-hidden />} title="No departments yet" action={add}>
+            Departments group faculty, subjects and classes. Add one to get started, or import a CSV file.
           </EmptyState>
         ) : (
           <DataTable head={['Name', 'Faculty', 'Subjects', 'Classes', '']}>
             {data.departments.map((d) => (
-              <tr key={d.id} className="hover:bg-slate-50">
-                <td className="px-5 py-3 font-medium text-slate-900">{d.name}</td>
-                <td className="px-5 py-3 text-slate-600">{count('faculty', d.id)}</td>
-                <td className="px-5 py-3 text-slate-600">{count('subjects', d.id)}</td>
-                <td className="px-5 py-3 text-slate-600">{count('classes', d.id)}</td>
-                <td className="px-5 py-2">
+              <tr key={d.id}>
+                <td className="px-4 font-medium text-fg">{d.name}</td>
+                <td className="px-4 tabular-nums text-fg-muted">{count('faculty', d.id)}</td>
+                <td className="px-4 tabular-nums text-fg-muted">{count('subjects', d.id)}</td>
+                <td className="px-4 tabular-nums text-fg-muted">{count('classes', d.id)}</td>
+                <td className="px-4">
                   <RowActions name={d.name} onEdit={() => editor.setEditing(d)} onDelete={() => editor.requestDelete(d)} />
                 </td>
               </tr>
@@ -57,6 +58,20 @@ export default function Departments({ data, refresh }: { data: AppData; refresh:
           </DataTable>
         )}
       </Card>
+
+      <Drawer
+        open={editor.open}
+        title={editor.editing ? `Edit ${editor.editing.name}` : 'Add department'}
+        formId="department-form"
+        submitLabel={editor.editing ? 'Save changes' : 'Add department'}
+        busy={editor.saving}
+        onClose={editor.close}
+        onSubmit={submit}
+      >
+        <Field label="Department name">
+          {(id) => <TextInput id={id} value={name} onChange={(e) => setName(e.target.value)} required maxLength={100} autoFocus />}
+        </Field>
+      </Drawer>
       {editor.dialog}
     </div>
   );

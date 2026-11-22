@@ -1,77 +1,88 @@
-import { useEffect, useRef, useState } from 'react';
-import { Users } from 'lucide-react';
-import type { AppData, Faculty as FacultyRow } from '../types';
-import { Button, Card, CsvImport, DataTable, EmptyState, Field, RowActions, SelectInput, TextInput } from '../ui';
+import { useEffect, useState } from 'react';
+import { Building2, Plus, Users } from 'lucide-react';
+import type { AppData, Faculty as FacultyRow, Page } from '../types';
+import { Button, Card, CsvImport, DataTable, Drawer, EmptyState, Field, Meter, PageHeader, RowActions, SelectInput, TextInput } from '../ui';
 import { useEntityEditor } from '../useEntityEditor';
 
 const blank = { name: '', email: '', dept_id: '' };
 
-export default function Faculty({ data, refresh, focusForm }: { data: AppData; refresh: () => Promise<void>; focusForm: boolean }) {
+/** Shown on pages whose records belong to a department when none exist yet. */
+export function NeedsDepartment({ what, navigate }: { what: string; navigate: (p: Page) => void }) {
+  return (
+    <EmptyState
+      icon={<Building2 size={18} aria-hidden />}
+      title="Add a department first"
+      action={
+        <Button variant="primary" icon={<Plus size={15} aria-hidden />} onClick={() => navigate('departments')}>
+          Go to departments
+        </Button>
+      }
+    >
+      Every {what} belongs to a department.
+    </EmptyState>
+  );
+}
+
+export default function Faculty({
+  data,
+  refresh,
+  openForm,
+  navigate,
+}: {
+  data: AppData;
+  refresh: () => Promise<void>;
+  openForm: boolean;
+  navigate: (p: Page) => void;
+}) {
   const editor = useEntityEditor<FacultyRow>('faculty', 'Faculty member', refresh);
   const [form, setForm] = useState(blank);
-  const nameRef = useRef<HTMLInputElement>(null);
+  const noDepts = data.departments.length === 0;
 
   useEffect(() => {
+    if (!editor.open) return;
     const f = editor.editing;
     setForm(f ? { name: f.name, email: f.email ?? '', dept_id: String(f.dept_id ?? '') } : blank);
-    if (f) nameRef.current?.focus();
-  }, [editor.editing]);
+  }, [editor.open, editor.editing]);
 
   useEffect(() => {
-    if (focusForm) nameRef.current?.focus();
-  }, [focusForm]);
+    if (openForm && !noDepts) editor.openNew();
+  }, [openForm]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (await editor.save({ ...form, dept_id: Number(form.dept_id) })) setForm(blank);
+    await editor.save({ ...form, dept_id: Number(form.dept_id) });
   };
 
   const slots = data.settings.workingDays.length * data.settings.periodsPerDay;
   const deptName = (id: number) => data.departments.find((d) => d.id === id)?.name ?? '—';
+  const add = (
+    <Button variant="primary" icon={<Plus size={15} aria-hidden />} onClick={editor.openNew} disabled={noDepts}>
+      Add faculty
+    </Button>
+  );
 
   return (
-    <div className="space-y-6">
-      <Card
-        title={editor.editing ? `Edit ${editor.editing.name}` : 'Add faculty member'}
-        actions={!editor.editing && <CsvImport type="faculty" columns="name, email, dept_id" onDone={refresh} />}
-      >
-        {data.departments.length === 0 ? (
-          <p className="text-sm text-slate-500">Create a department first.</p>
-        ) : (
-          <form onSubmit={submit} className="grid gap-4 md:grid-cols-[1fr_1fr_1fr_auto] md:items-end">
-            <Field label="Full name">
-              {(id) => (
-                <TextInput id={id} ref={nameRef} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required maxLength={100} />
-              )}
-            </Field>
-            <Field label="Email (optional)">
-              {(id) => <TextInput id={id} type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />}
-            </Field>
-            <Field label="Department">
-              {(id) => (
-                <SelectInput id={id} value={form.dept_id} onChange={(e) => setForm({ ...form, dept_id: e.target.value })} required>
-                  <option value="">Select…</option>
-                  {data.departments.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </SelectInput>
-              )}
-            </Field>
-            <div className="flex gap-2">
-              {editor.editing && <Button onClick={() => editor.setEditing(null)}>Cancel</Button>}
-              <Button type="submit" variant="primary" busy={editor.saving}>
-                {editor.editing ? 'Save changes' : 'Add faculty'}
-              </Button>
-            </div>
-          </form>
-        )}
-      </Card>
+    <div className="space-y-4">
+      <PageHeader
+        title="All faculty"
+        description={`${data.faculty.length} ${data.faculty.length === 1 ? 'member' : 'members'} · weekly load out of ${slots} periods`}
+        actions={
+          <>
+            <CsvImport type="faculty" columns="name, email, dept_id" onDone={refresh} />
+            {add}
+          </>
+        }
+      />
 
-      <Card title="Faculty" description={`${data.faculty.length} members · weekly load out of ${slots} periods`}>
+      <Card flush>
         {data.faculty.length === 0 ? (
-          <EmptyState icon={<Users size={20} aria-hidden />} title="No faculty members yet" />
+          noDepts ? (
+            <NeedsDepartment what="faculty member" navigate={navigate} />
+          ) : (
+            <EmptyState icon={<Users size={18} aria-hidden />} title="No faculty members yet" action={add}>
+              Add teaching staff, then assign them to subjects.
+            </EmptyState>
+          )
         ) : (
           <DataTable head={['Name', 'Email', 'Department', 'Teaches', 'Weekly load', '']}>
             {data.faculty.map((f) => {
@@ -81,20 +92,15 @@ export default function Faculty({ data, refresh, focusForm }: { data: AppData; r
                 .map((fs) => data.subjects.find((s) => s.id === fs.subject_id)?.code)
                 .filter(Boolean);
               return (
-                <tr key={f.id} className="hover:bg-slate-50">
-                  <td className="px-5 py-3 font-medium text-slate-900">{f.name}</td>
-                  <td className="px-5 py-3 text-slate-600">{f.email || '—'}</td>
-                  <td className="px-5 py-3 text-slate-600">{deptName(f.dept_id)}</td>
-                  <td className="px-5 py-3 text-slate-600">{subjects.length ? subjects.join(', ') : '—'}</td>
-                  <td className="px-5 py-3">
-                    <div className="flex items-center gap-3">
-                      <span className="w-8 tabular-nums text-slate-700">{load}</span>
-                      <div className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100" aria-hidden>
-                        <div className="h-full bg-indigo-600" style={{ width: `${slots ? Math.min(100, (load / slots) * 100) : 0}%` }} />
-                      </div>
-                    </div>
+                <tr key={f.id}>
+                  <td className="px-4 font-medium text-fg">{f.name}</td>
+                  <td className="px-4 text-fg-muted">{f.email || '—'}</td>
+                  <td className="px-4 text-fg-muted">{deptName(f.dept_id)}</td>
+                  <td className="px-4 font-mono text-xs text-fg-muted">{subjects.length ? subjects.join(', ') : '—'}</td>
+                  <td className="px-4">
+                    <Meter value={load} max={slots} />
                   </td>
-                  <td className="px-5 py-2">
+                  <td className="px-4">
                     <RowActions name={f.name} onEdit={() => editor.setEditing(f)} onDelete={() => editor.requestDelete(f)} />
                   </td>
                 </tr>
@@ -103,6 +109,35 @@ export default function Faculty({ data, refresh, focusForm }: { data: AppData; r
           </DataTable>
         )}
       </Card>
+
+      <Drawer
+        open={editor.open}
+        title={editor.editing ? `Edit ${editor.editing.name}` : 'Add faculty member'}
+        formId="faculty-form"
+        submitLabel={editor.editing ? 'Save changes' : 'Add faculty'}
+        busy={editor.saving}
+        onClose={editor.close}
+        onSubmit={submit}
+      >
+        <Field label="Full name">
+          {(id) => <TextInput id={id} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required maxLength={100} autoFocus />}
+        </Field>
+        <Field label="Email" hint="Optional.">
+          {(id) => <TextInput id={id} type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />}
+        </Field>
+        <Field label="Department">
+          {(id) => (
+            <SelectInput id={id} value={form.dept_id} onChange={(e) => setForm({ ...form, dept_id: e.target.value })} required>
+              <option value="">Select…</option>
+              {data.departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </SelectInput>
+          )}
+        </Field>
+      </Drawer>
       {editor.dialog}
     </div>
   );

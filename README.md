@@ -15,8 +15,13 @@ You enter (or import from CSV) the departments, teachers, subjects, classes and 
 - Configurable working days (Monday to Saturday) and periods per day (1 to 10).
 - Greedy timetable generator that uses the smallest suitable room for each period.
 - Conflict report covering teacher, room and class double bookings, capacity problems, room-type mismatches, availability violations and unmet weekly periods.
-- Timetable views by class, by teacher or by room.
-- Print or save as PDF for one timetable or for all classes. This uses the browser's print dialog with a dedicated print stylesheet.
+- Timetable views by class, by teacher or by room, with clock times, colour-coded subjects, a "today" column and a live "now" line. On phones the week becomes a single-day view with day tabs.
+- Conflict badges on the affected timetable cards (red for clashes, amber for capacity, availability or room-type issues).
+- Quick filters by day, subject, class, teacher and room.
+- Export: print or save as PDF (one timetable or all classes), CSV (one timetable or all classes), and an `.ics` calendar file with weekly recurring events.
+- Configurable period clock times (first period start and period length), saved without regenerating.
+- Light and dark themes that follow the system setting, with a manual switch.
+- Each page has its own URL (`#/timetables`), so refresh and the back button work.
 - Dashboard figures computed from your data: periods scheduled compared with periods required, room utilisation, and teacher workload.
 
 ## Limitations
@@ -25,7 +30,7 @@ You enter (or import from CSV) the departments, teachers, subjects, classes and 
 - The generator is greedy, not an optimiser. It fills the earliest free periods first, so it does not spread a subject evenly across the week. When it cannot place a period, it reports the period as an unmet requirement and does not backtrack.
 - Every class takes every subject of its department. Electives and cross-department subjects are not modelled.
 - Each subject has one assigned teacher in the UI. The API and the generator accept several teachers per subject.
-- Periods have no clock times.
+- Periods are back to back: breaks between periods are not modelled.
 - PDF export relies on the browser's "Save as PDF" print destination.
 
 ## Tech stack

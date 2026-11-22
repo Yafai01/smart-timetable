@@ -14,8 +14,21 @@ export interface TimetableEntry {
   day: string;
   period: number;
 }
-export interface Conflict { type: string; message: string; severity: 'high' | 'medium' }
-export interface ScheduleSettings { workingDays: string[]; periodsPerDay: number }
+export interface Conflict {
+  type: string;
+  message: string;
+  severity: 'high' | 'medium';
+  entry_ids?: number[];
+  class_id?: number;
+}
+export interface ScheduleSettings {
+  workingDays: string[];
+  periodsPerDay: number;
+  /** First period start, HH:MM. Display only. */
+  startTime: string;
+  /** Length of each period in minutes. Display only. */
+  periodMinutes: number;
+}
 
 export interface AppData {
   departments: Department[];
@@ -44,11 +57,11 @@ export const EMPTY_DATA: AppData = {
   faculty_availability: [],
   timetable: [],
   conflicts: [],
-  settings: { workingDays: [...ALL_DAYS], periodsPerDay: 6 },
+  settings: { workingDays: [...ALL_DAYS], periodsPerDay: 6, startTime: '09:00', periodMinutes: 60 },
   last_generated_at: null,
 };
 
 export type Page = 'dashboard' | 'departments' | 'faculty' | 'availability' | 'subjects' | 'classes' | 'rooms' | 'timetables';
 
 /** One-shot navigation intents triggered from dashboard quick actions. */
-export type Intent = 'new-faculty' | 'new-lab-subject' | 'print-all' | null;
+export type Intent = 'new-faculty' | 'new-lab-subject' | 'new-class' | 'print-all' | null;

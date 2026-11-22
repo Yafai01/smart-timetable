@@ -5,16 +5,32 @@ import { ConfirmDialog, useToast } from './ui';
 /**
  * Shared create / edit / delete flow for a REST resource such as
  * `/api/rooms`. Pages own their form state; this hook owns the requests,
- * busy flags, toasts and the delete confirmation dialog.
+ * busy flags, toasts, the drawer's open state and the delete confirmation.
  */
 export function useEntityEditor<T extends { id: number; name: string }>(resource: string, label: string, refresh: () => Promise<void>) {
   const toast = useToast();
-  const [editing, setEditing] = useState<T | null>(null);
+  const [editing, setEditingRow] = useState<T | null>(null);
+  const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<T | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  /** Returns true on success so the caller can reset its form. */
+  /** Open the drawer to edit a row. */
+  const setEditing = (row: T | null) => {
+    setEditingRow(row);
+    setCreating(false);
+  };
+  /** Open the drawer with an empty form. */
+  const openNew = () => {
+    setEditingRow(null);
+    setCreating(true);
+  };
+  const close = () => {
+    setEditingRow(null);
+    setCreating(false);
+  };
+
+  /** Returns true on success; the drawer closes. */
   const save = async (payload: Record<string, unknown>): Promise<boolean> => {
     setSaving(true);
     try {
@@ -25,7 +41,7 @@ export function useEntityEditor<T extends { id: number; name: string }>(resource
         await send('POST', `/api/${resource}`, payload);
         toast('success', `${label} added.`);
       }
-      setEditing(null);
+      close();
       await refresh();
       return true;
     } catch (err) {
@@ -48,7 +64,7 @@ export function useEntityEditor<T extends { id: number; name: string }>(resource
           ? `${pendingDelete.name} deleted. ${removed} scheduled ${removed === 1 ? 'period was' : 'periods were'} removed; regenerate the timetable to fill the gaps.`
           : `${pendingDelete.name} deleted.`,
       );
-      if (editing?.id === pendingDelete.id) setEditing(null);
+      if (editing?.id === pendingDelete.id) close();
       setPendingDelete(null);
       await refresh();
     } catch (err) {
@@ -65,7 +81,7 @@ export function useEntityEditor<T extends { id: number; name: string }>(resource
       title={`Delete ${label.toLowerCase()}?`}
       message={
         <>
-          <strong className="font-medium text-slate-900">{pendingDelete?.name}</strong> will be permanently deleted, along with any
+          <strong className="font-medium text-fg">{pendingDelete?.name}</strong> will be permanently deleted, along with any
           timetable periods that use it. This cannot be undone.
         </>
       }
@@ -75,5 +91,5 @@ export function useEntityEditor<T extends { id: number; name: string }>(resource
     />
   );
 
-  return { editing, setEditing, saving, save, requestDelete: setPendingDelete, dialog };
+  return { editing, setEditing, creating, open: creating || editing !== null, openNew, close, saving, save, requestDelete: setPendingDelete, dialog };
 }
