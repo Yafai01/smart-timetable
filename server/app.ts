@@ -1,8 +1,8 @@
-import express, { type NextFunction, type Request, type Response } from "express";
+import express, { type NextFunction, type Request, type RequestHandler, type Response } from "express";
 import multer from "multer";
 import csv from "csv-parser";
 import { Readable } from "stream";
-import type { DB } from "./db.js";
+import type { DB, Stmt } from "./db.js";
 import {
   ALL_DAYS,
   MAX_PERIODS_PER_DAY,
@@ -64,10 +64,24 @@ function idParam(req: Request): number {
   return id;
 }
 
+/** Express 4 does not catch rejected promises; forward them to the error handler. */
+const route =
+  (fn: (req: Request, res: Response) => Promise<unknown>): RequestHandler =>
+  (req, res, next) => {
+    fn(req, res).catch(next);
+  };
+
 // ---------- app ----------
 
 const UPLOAD_TYPES = ["departments", "faculty", "subjects", "classes", "rooms"] as const;
 type UploadType = (typeof UPLOAD_TYPES)[number];
+type Table = UploadType;
+
+/** Ids that parsed rows may reference, loaded once per request. */
+interface Refs {
+  departments: Set<number>;
+  faculty: Set<number>;
+}
 
 export function createApp(db: DB) {
   const app = express();
@@ -76,86 +90,106 @@ export function createApp(db: DB) {
 
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024, files: 1 } });
 
-  const exists = (table: string, id: number) => Boolean(db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id));
-  const requireRow = (table: string, id: number, label: string) => {
-    if (!exists(table, id)) throw new HttpError(404, `${label} not found.`);
+  const requireRow = async (table: Table, id: number, label: string) => {
+    if (!(await db.get(`SELECT 1 FROM ${table} WHERE id = ?`, [id]))) throw new HttpError(404, `${label} not found.`);
   };
-  const deptId = (body: Body) => {
+  const loadRefs = async (): Promise<Refs> => {
+    const ids = async (table: Table) => new Set((await db.all<{ id: number }>(`SELECT id FROM ${table}`)).map((r) => r.id));
+    const [departments, faculty] = await Promise.all([ids("departments"), ids("faculty")]);
+    return { departments, faculty };
+  };
+
+  const deptId = (body: Body, refs: Refs) => {
     const id = int(body, "dept_id", "Department", 1, Number.MAX_SAFE_INTEGER);
-    if (!exists("departments", id)) throw new HttpError(400, "Selected department does not exist.");
+    if (!refs.departments.has(id)) throw new HttpError(400, "Selected department does not exist.");
     return id;
   };
-  const optionalFacultyId = (body: Body): number | null => {
+  const optionalFacultyId = (body: Body, refs: Refs): number | null => {
     const v = body.faculty_id;
     if (v === undefined || v === null || v === "") return null;
     const id = int(body, "faculty_id", "Faculty", 1, Number.MAX_SAFE_INTEGER);
-    if (!exists("faculty", id)) throw new HttpError(400, "Selected faculty member does not exist.");
+    if (!refs.faculty.has(id)) throw new HttpError(400, "Selected faculty member does not exist.");
     return id;
   };
 
-  // Field parsers shared by JSON endpoints and CSV import.
+  // Field parsers shared by JSON endpoints and CSV import. Each returns the
+  // validated values and the INSERT statement for them.
   const parse = {
-    departments: (b: Body) => ({ name: text(b, "name", "Department name") }),
-    faculty: (b: Body) => ({ name: text(b, "name", "Name"), email: email(b, "email"), dept_id: deptId(b) }),
-    subjects: (b: Body) => ({
-      name: text(b, "name", "Subject name"),
-      code: text(b, "code", "Subject code", 20),
-      periods_per_week: int(b, "periods_per_week", "Periods per week", 1, ALL_DAYS.length * MAX_PERIODS_PER_DAY),
-      is_lab: bool(b, "is_lab") ? 1 : 0,
-      dept_id: deptId(b),
-    }),
-    classes: (b: Body) => ({
-      name: text(b, "name", "Class name"),
-      dept_id: deptId(b),
-      student_count: int(b, "student_count", "Student count", 1, 10000),
-    }),
-    rooms: (b: Body) => ({
-      name: text(b, "name", "Room name"),
-      capacity: int(b, "capacity", "Capacity", 1, 10000),
-      is_lab: bool(b, "is_lab") ? 1 : 0,
-    }),
+    departments: (b: Body, _refs: Refs) => {
+      const v = { name: text(b, "name", "Department name") };
+      return { v, insert: { sql: "INSERT INTO departments (name) VALUES (?)", args: [v.name] } };
+    },
+    faculty: (b: Body, refs: Refs) => {
+      const v = { name: text(b, "name", "Name"), email: email(b, "email"), dept_id: deptId(b, refs) };
+      return {
+        v,
+        insert: { sql: "INSERT INTO faculty (name, email, dept_id) VALUES (?, ?, ?)", args: [v.name, v.email, v.dept_id] },
+      };
+    },
+    subjects: (b: Body, refs: Refs) => {
+      const v = {
+        name: text(b, "name", "Subject name"),
+        code: text(b, "code", "Subject code", 20),
+        periods_per_week: int(b, "periods_per_week", "Periods per week", 1, ALL_DAYS.length * MAX_PERIODS_PER_DAY),
+        is_lab: bool(b, "is_lab") ? 1 : 0,
+        dept_id: deptId(b, refs),
+      };
+      return {
+        v,
+        insert: {
+          sql: "INSERT INTO subjects (name, code, periods_per_week, is_lab, dept_id) VALUES (?, ?, ?, ?, ?)",
+          args: [v.name, v.code, v.periods_per_week, v.is_lab, v.dept_id],
+        },
+      };
+    },
+    classes: (b: Body, refs: Refs) => {
+      const v = {
+        name: text(b, "name", "Class name"),
+        dept_id: deptId(b, refs),
+        student_count: int(b, "student_count", "Student count", 1, 10000),
+      };
+      return {
+        v,
+        insert: {
+          sql: "INSERT INTO classes (name, dept_id, student_count) VALUES (?, ?, ?)",
+          args: [v.name, v.dept_id, v.student_count],
+        },
+      };
+    },
+    rooms: (b: Body, _refs: Refs) => {
+      const v = { name: text(b, "name", "Room name"), capacity: int(b, "capacity", "Capacity", 1, 10000), is_lab: bool(b, "is_lab") ? 1 : 0 };
+      return { v, insert: { sql: "INSERT INTO rooms (name, capacity, is_lab) VALUES (?, ?, ?)", args: [v.name, v.capacity, v.is_lab] } };
+    },
+  } satisfies Record<UploadType, (b: Body, refs: Refs) => { v: unknown; insert: Stmt }>;
+
+  /** Links the subject inserted just before (last_insert_rowid) to its teacher, in the same batch. */
+  const linkNewSubject = (facultyId: number | null): Stmt[] =>
+    facultyId === null
+      ? []
+      : [{ sql: "INSERT INTO faculty_subjects (faculty_id, subject_id) VALUES (?, last_insert_rowid())", args: [facultyId] }];
+
+  const loadAll = async () => {
+    const [departments, faculty, subjects, classes, rooms, faculty_subjects, faculty_availability, timetable] = await Promise.all([
+      db.all<{ id: number; name: string }>("SELECT * FROM departments ORDER BY name"),
+      db.all<Faculty>("SELECT * FROM faculty ORDER BY name"),
+      db.all<Subject>("SELECT * FROM subjects ORDER BY code"),
+      db.all<ClassGroup>("SELECT * FROM classes ORDER BY name"),
+      db.all<Room>("SELECT * FROM rooms ORDER BY name"),
+      db.all<FacultySubject>("SELECT * FROM faculty_subjects"),
+      db.all<Availability>("SELECT * FROM faculty_availability"),
+      db.all<Entry & { id: number }>("SELECT * FROM timetable_entries ORDER BY id"),
+    ]);
+    return { departments, faculty, subjects, classes, rooms, faculty_subjects, faculty_availability, timetable };
   };
 
-  const insert = {
-    departments: (v: ReturnType<typeof parse.departments>) =>
-      db.prepare("INSERT INTO departments (name) VALUES (?)").run(v.name).lastInsertRowid,
-    faculty: (v: ReturnType<typeof parse.faculty>) =>
-      db.prepare("INSERT INTO faculty (name, email, dept_id) VALUES (?, ?, ?)").run(v.name, v.email, v.dept_id).lastInsertRowid,
-    subjects: (v: ReturnType<typeof parse.subjects>) =>
-      db
-        .prepare("INSERT INTO subjects (name, code, periods_per_week, is_lab, dept_id) VALUES (?, ?, ?, ?, ?)")
-        .run(v.name, v.code, v.periods_per_week, v.is_lab, v.dept_id).lastInsertRowid,
-    classes: (v: ReturnType<typeof parse.classes>) =>
-      db.prepare("INSERT INTO classes (name, dept_id, student_count) VALUES (?, ?, ?)").run(v.name, v.dept_id, v.student_count)
-        .lastInsertRowid,
-    rooms: (v: ReturnType<typeof parse.rooms>) =>
-      db.prepare("INSERT INTO rooms (name, capacity, is_lab) VALUES (?, ?, ?)").run(v.name, v.capacity, v.is_lab).lastInsertRowid,
-  };
-
-  const setSubjectFaculty = (subjectId: number, facultyId: number | null) => {
-    db.prepare("DELETE FROM faculty_subjects WHERE subject_id = ?").run(subjectId);
-    if (facultyId !== null) {
-      db.prepare("INSERT INTO faculty_subjects (faculty_id, subject_id) VALUES (?, ?)").run(facultyId, subjectId);
-    }
-  };
-
-  const loadAll = () => ({
-    departments: db.prepare("SELECT * FROM departments ORDER BY name").all(),
-    faculty: db.prepare("SELECT * FROM faculty ORDER BY name").all() as Faculty[],
-    subjects: db.prepare("SELECT * FROM subjects ORDER BY code").all() as Subject[],
-    classes: db.prepare("SELECT * FROM classes ORDER BY name").all() as ClassGroup[],
-    rooms: db.prepare("SELECT * FROM rooms ORDER BY name").all() as Room[],
-    faculty_subjects: db.prepare("SELECT * FROM faculty_subjects").all() as FacultySubject[],
-    faculty_availability: db.prepare("SELECT * FROM faculty_availability").all() as Availability[],
-    timetable: db.prepare("SELECT * FROM timetable_entries ORDER BY id").all() as (Entry & { id: number })[],
+  const getMeta = async (key: string) =>
+    (await db.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", [key]))?.value ?? null;
+  const setMeta = (key: string, value: string): Stmt => ({
+    sql: "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    args: [key, value],
   });
 
-  const getMeta = (key: string) =>
-    (db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined)?.value ?? null;
-  const setMeta = (key: string, value: string) =>
-    db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
-
-  const conflictsFor = (d: ReturnType<typeof loadAll>) =>
+  const conflictsFor = (d: Awaited<ReturnType<typeof loadAll>>) =>
     detectConflicts({
       entries: d.timetable,
       classes: d.classes,
@@ -165,8 +199,8 @@ export function createApp(db: DB) {
       availability: d.faculty_availability,
     });
 
-  const settings = () => {
-    const stored = getMeta("schedule_settings");
+  const settings = async () => {
+    const stored = await getMeta("schedule_settings");
     const fallback = { workingDays: [...ALL_DAYS], periodsPerDay: 6 };
     return stored ? (JSON.parse(stored) as typeof fallback) : fallback;
   };
@@ -177,250 +211,266 @@ export function createApp(db: DB) {
     res.json({ ok: true });
   });
 
-  app.get("/api/data", (_req, res) => {
-    const d = loadAll();
-    res.json({
-      ...d,
-      conflicts: conflictsFor(d),
-      settings: settings(),
-      last_generated_at: getMeta("last_generated_at"),
-    });
-  });
+  app.get(
+    "/api/data",
+    route(async (_req, res) => {
+      const [d, s, last] = await Promise.all([loadAll(), settings(), getMeta("last_generated_at")]);
+      res.json({ ...d, conflicts: conflictsFor(d), settings: s, last_generated_at: last });
+    }),
+  );
 
   // ---------- create / update / delete ----------
 
-  app.post("/api/departments", (req, res) => {
-    res.status(201).json({ id: Number(insert.departments(parse.departments(req.body ?? {}))) });
-  });
-  app.put("/api/departments/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("departments", id, "Department");
-    const v = parse.departments(req.body ?? {});
-    db.prepare("UPDATE departments SET name = ? WHERE id = ?").run(v.name, id);
-    res.json({ id });
-  });
-  app.delete("/api/departments/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("departments", id, "Department");
-    const used = ["faculty", "subjects", "classes"].filter((t) => db.prepare(`SELECT 1 FROM ${t} WHERE dept_id = ? LIMIT 1`).get(id));
-    if (used.length) {
-      throw new HttpError(409, `This department still has ${used.join(", ")}. Move or delete them first.`);
-    }
-    db.prepare("DELETE FROM departments WHERE id = ?").run(id);
-    res.json({ id });
-  });
+  /** POST handler for entities with no extra relations. */
+  const create = (type: "departments" | "faculty" | "classes" | "rooms") =>
+    route(async (req, res) => {
+      const { insert } = parse[type](req.body ?? {}, await loadRefs());
+      const r = await db.run(insert.sql, insert.args);
+      res.status(201).json({ id: r.lastInsertRowid });
+    });
 
-  app.post("/api/faculty", (req, res) => {
-    res.status(201).json({ id: Number(insert.faculty(parse.faculty(req.body ?? {}))) });
-  });
-  app.put("/api/faculty/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("faculty", id, "Faculty member");
-    const v = parse.faculty(req.body ?? {});
-    db.prepare("UPDATE faculty SET name = ?, email = ?, dept_id = ? WHERE id = ?").run(v.name, v.email, v.dept_id, id);
-    res.json({ id });
-  });
-  app.delete("/api/faculty/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("faculty", id, "Faculty member");
-    const removed = db.transaction(() => {
-      const r = db.prepare("DELETE FROM timetable_entries WHERE faculty_id = ?").run(id).changes;
-      db.prepare("DELETE FROM faculty_subjects WHERE faculty_id = ?").run(id);
-      db.prepare("DELETE FROM faculty_availability WHERE faculty_id = ?").run(id);
-      db.prepare("DELETE FROM faculty WHERE id = ?").run(id);
-      return r;
-    })();
-    res.json({ id, removedEntries: removed });
-  });
+  /** DELETE handler: removes the row and its dependants atomically, reporting removed timetable periods. */
+  const remove = (table: Table, label: string, column: string, dependants: string[] = []) =>
+    route(async (req, res) => {
+      const id = idParam(req);
+      await requireRow(table, id, label);
+      const [entries] = await db.batch([
+        { sql: `DELETE FROM timetable_entries WHERE ${column} = ?`, args: [id] },
+        ...dependants.map((sql) => ({ sql, args: [id] })),
+        { sql: `DELETE FROM ${table} WHERE id = ?`, args: [id] },
+      ]);
+      res.json({ id, removedEntries: entries.changes });
+    });
 
-  app.post("/api/subjects", (req, res) => {
-    const body = req.body ?? {};
-    const v = parse.subjects(body);
-    const facultyId = optionalFacultyId(body);
-    const id = db.transaction(() => {
-      const newId = Number(insert.subjects(v));
-      setSubjectFaculty(newId, facultyId);
-      return newId;
-    })();
-    res.status(201).json({ id });
-  });
-  app.put("/api/subjects/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("subjects", id, "Subject");
-    const body = req.body ?? {};
-    const v = parse.subjects(body);
-    const facultyId = optionalFacultyId(body);
-    db.transaction(() => {
-      db.prepare("UPDATE subjects SET name = ?, code = ?, periods_per_week = ?, is_lab = ?, dept_id = ? WHERE id = ?").run(
-        v.name, v.code, v.periods_per_week, v.is_lab, v.dept_id, id,
-      );
-      if ("faculty_id" in body) setSubjectFaculty(id, facultyId);
-    })();
-    res.json({ id });
-  });
-  app.delete("/api/subjects/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("subjects", id, "Subject");
-    const removed = db.transaction(() => {
-      const r = db.prepare("DELETE FROM timetable_entries WHERE subject_id = ?").run(id).changes;
-      db.prepare("DELETE FROM faculty_subjects WHERE subject_id = ?").run(id);
-      db.prepare("DELETE FROM subjects WHERE id = ?").run(id);
-      return r;
-    })();
-    res.json({ id, removedEntries: removed });
-  });
+  app.post("/api/departments", create("departments"));
+  app.put(
+    "/api/departments/:id",
+    route(async (req, res) => {
+      const id = idParam(req);
+      await requireRow("departments", id, "Department");
+      const { v } = parse.departments(req.body ?? {}, await loadRefs());
+      await db.run("UPDATE departments SET name = ? WHERE id = ?", [v.name, id]);
+      res.json({ id });
+    }),
+  );
+  app.delete(
+    "/api/departments/:id",
+    route(async (req, res) => {
+      const id = idParam(req);
+      await requireRow("departments", id, "Department");
+      const used: string[] = [];
+      for (const t of ["faculty", "subjects", "classes"] as const) {
+        if (await db.get(`SELECT 1 FROM ${t} WHERE dept_id = ? LIMIT 1`, [id])) used.push(t);
+      }
+      if (used.length) {
+        throw new HttpError(409, `This department still has ${used.join(", ")}. Move or delete them first.`);
+      }
+      await db.run("DELETE FROM departments WHERE id = ?", [id]);
+      res.json({ id });
+    }),
+  );
 
-  app.post("/api/classes", (req, res) => {
-    res.status(201).json({ id: Number(insert.classes(parse.classes(req.body ?? {}))) });
-  });
-  app.put("/api/classes/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("classes", id, "Class");
-    const v = parse.classes(req.body ?? {});
-    db.prepare("UPDATE classes SET name = ?, dept_id = ?, student_count = ? WHERE id = ?").run(v.name, v.dept_id, v.student_count, id);
-    res.json({ id });
-  });
-  app.delete("/api/classes/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("classes", id, "Class");
-    const removed = db.transaction(() => {
-      const r = db.prepare("DELETE FROM timetable_entries WHERE class_id = ?").run(id).changes;
-      db.prepare("DELETE FROM classes WHERE id = ?").run(id);
-      return r;
-    })();
-    res.json({ id, removedEntries: removed });
-  });
+  app.post("/api/faculty", create("faculty"));
+  app.put(
+    "/api/faculty/:id",
+    route(async (req, res) => {
+      const id = idParam(req);
+      await requireRow("faculty", id, "Faculty member");
+      const { v } = parse.faculty(req.body ?? {}, await loadRefs());
+      await db.run("UPDATE faculty SET name = ?, email = ?, dept_id = ? WHERE id = ?", [v.name, v.email, v.dept_id, id]);
+      res.json({ id });
+    }),
+  );
+  app.delete(
+    "/api/faculty/:id",
+    remove("faculty", "Faculty member", "faculty_id", [
+      "DELETE FROM faculty_subjects WHERE faculty_id = ?",
+      "DELETE FROM faculty_availability WHERE faculty_id = ?",
+    ]),
+  );
 
-  app.post("/api/rooms", (req, res) => {
-    res.status(201).json({ id: Number(insert.rooms(parse.rooms(req.body ?? {}))) });
-  });
-  app.put("/api/rooms/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("rooms", id, "Room");
-    const v = parse.rooms(req.body ?? {});
-    db.prepare("UPDATE rooms SET name = ?, capacity = ?, is_lab = ? WHERE id = ?").run(v.name, v.capacity, v.is_lab, id);
-    res.json({ id });
-  });
-  app.delete("/api/rooms/:id", (req, res) => {
-    const id = idParam(req);
-    requireRow("rooms", id, "Room");
-    const removed = db.transaction(() => {
-      const r = db.prepare("DELETE FROM timetable_entries WHERE room_id = ?").run(id).changes;
-      db.prepare("DELETE FROM rooms WHERE id = ?").run(id);
-      return r;
-    })();
-    res.json({ id, removedEntries: removed });
-  });
+  app.post(
+    "/api/subjects",
+    route(async (req, res) => {
+      const body = req.body ?? {};
+      const refs = await loadRefs();
+      const { insert } = parse.subjects(body, refs);
+      const facultyId = optionalFacultyId(body, refs);
+      const [r] = await db.batch([insert, ...linkNewSubject(facultyId)]);
+      res.status(201).json({ id: r.lastInsertRowid });
+    }),
+  );
+  app.put(
+    "/api/subjects/:id",
+    route(async (req, res) => {
+      const id = idParam(req);
+      await requireRow("subjects", id, "Subject");
+      const body = req.body ?? {};
+      const refs = await loadRefs();
+      const { v } = parse.subjects(body, refs);
+      const facultyId = optionalFacultyId(body, refs);
+      const stmts: Stmt[] = [
+        {
+          sql: "UPDATE subjects SET name = ?, code = ?, periods_per_week = ?, is_lab = ?, dept_id = ? WHERE id = ?",
+          args: [v.name, v.code, v.periods_per_week, v.is_lab, v.dept_id, id],
+        },
+      ];
+      if ("faculty_id" in body) {
+        stmts.push({ sql: "DELETE FROM faculty_subjects WHERE subject_id = ?", args: [id] });
+        if (facultyId !== null) {
+          stmts.push({ sql: "INSERT INTO faculty_subjects (faculty_id, subject_id) VALUES (?, ?)", args: [facultyId, id] });
+        }
+      }
+      await db.batch(stmts);
+      res.json({ id });
+    }),
+  );
+  app.delete("/api/subjects/:id", remove("subjects", "Subject", "subject_id", ["DELETE FROM faculty_subjects WHERE subject_id = ?"]));
+
+  app.post("/api/classes", create("classes"));
+  app.put(
+    "/api/classes/:id",
+    route(async (req, res) => {
+      const id = idParam(req);
+      await requireRow("classes", id, "Class");
+      const { v } = parse.classes(req.body ?? {}, await loadRefs());
+      await db.run("UPDATE classes SET name = ?, dept_id = ?, student_count = ? WHERE id = ?", [v.name, v.dept_id, v.student_count, id]);
+      res.json({ id });
+    }),
+  );
+  app.delete("/api/classes/:id", remove("classes", "Class", "class_id"));
+
+  app.post("/api/rooms", create("rooms"));
+  app.put(
+    "/api/rooms/:id",
+    route(async (req, res) => {
+      const id = idParam(req);
+      await requireRow("rooms", id, "Room");
+      const { v } = parse.rooms(req.body ?? {}, await loadRefs());
+      await db.run("UPDATE rooms SET name = ?, capacity = ?, is_lab = ? WHERE id = ?", [v.name, v.capacity, v.is_lab, id]);
+      res.json({ id });
+    }),
+  );
+  app.delete("/api/rooms/:id", remove("rooms", "Room", "room_id"));
 
   // ---------- assignments & availability ----------
 
-  app.post("/api/assign-faculty", (req, res) => {
-    const body = req.body ?? {};
-    const facultyId = int(body, "faculty_id", "Faculty", 1, Number.MAX_SAFE_INTEGER);
-    const subjectId = int(body, "subject_id", "Subject", 1, Number.MAX_SAFE_INTEGER);
-    requireRow("faculty", facultyId, "Faculty member");
-    requireRow("subjects", subjectId, "Subject");
-    const r = db.prepare("INSERT OR IGNORE INTO faculty_subjects (faculty_id, subject_id) VALUES (?, ?)").run(facultyId, subjectId);
-    if (r.changes === 0) throw new HttpError(409, "This faculty member is already assigned to the subject.");
-    res.status(201).json({ success: true });
-  });
+  app.post(
+    "/api/assign-faculty",
+    route(async (req, res) => {
+      const body = req.body ?? {};
+      const facultyId = int(body, "faculty_id", "Faculty", 1, Number.MAX_SAFE_INTEGER);
+      const subjectId = int(body, "subject_id", "Subject", 1, Number.MAX_SAFE_INTEGER);
+      await requireRow("faculty", facultyId, "Faculty member");
+      await requireRow("subjects", subjectId, "Subject");
+      const r = await db.run("INSERT OR IGNORE INTO faculty_subjects (faculty_id, subject_id) VALUES (?, ?)", [facultyId, subjectId]);
+      if (r.changes === 0) throw new HttpError(409, "This faculty member is already assigned to the subject.");
+      res.status(201).json({ success: true });
+    }),
+  );
 
-  app.post("/api/faculty-availability", (req, res) => {
-    const body = req.body ?? {};
-    const facultyId = int(body, "faculty_id", "Faculty", 1, Number.MAX_SAFE_INTEGER);
-    requireRow("faculty", facultyId, "Faculty member");
-    const day = body.day;
-    if (typeof day !== "string" || !(ALL_DAYS as readonly string[]).includes(day)) throw new HttpError(400, "Day is not valid.");
-    const period = int(body, "period", "Period", 1, MAX_PERIODS_PER_DAY);
-    db.prepare(
-      `INSERT INTO faculty_availability (faculty_id, day, period, is_available) VALUES (?, ?, ?, ?)
-       ON CONFLICT(faculty_id, day, period) DO UPDATE SET is_available = excluded.is_available`,
-    ).run(facultyId, day, period, bool(body, "is_available") ? 1 : 0);
-    res.json({ success: true });
-  });
+  app.post(
+    "/api/faculty-availability",
+    route(async (req, res) => {
+      const body = req.body ?? {};
+      const facultyId = int(body, "faculty_id", "Faculty", 1, Number.MAX_SAFE_INTEGER);
+      await requireRow("faculty", facultyId, "Faculty member");
+      const day = body.day;
+      if (typeof day !== "string" || !(ALL_DAYS as readonly string[]).includes(day)) throw new HttpError(400, "Day is not valid.");
+      const period = int(body, "period", "Period", 1, MAX_PERIODS_PER_DAY);
+      await db.run(
+        `INSERT INTO faculty_availability (faculty_id, day, period, is_available) VALUES (?, ?, ?, ?)
+         ON CONFLICT(faculty_id, day, period) DO UPDATE SET is_available = excluded.is_available`,
+        [facultyId, day, period, bool(body, "is_available") ? 1 : 0],
+      );
+      res.json({ success: true });
+    }),
+  );
 
   // ---------- CSV import ----------
 
-  app.post("/api/upload/:type", upload.single("file"), (req, res, next) => {
-    importCsv(req, res).catch(next);
-  });
+  app.post(
+    "/api/upload/:type",
+    upload.single("file"),
+    route(async (req, res) => {
+      const type = req.params.type as UploadType;
+      if (!UPLOAD_TYPES.includes(type)) throw new HttpError(400, "Unknown import type.");
+      if (!req.file) throw new HttpError(400, "No file uploaded.");
 
-  const importCsv = async (req: Request, res: Response) => {
-    const type = req.params.type as UploadType;
-    if (!UPLOAD_TYPES.includes(type)) throw new HttpError(400, "Unknown import type.");
-    if (!req.file) throw new HttpError(400, "No file uploaded.");
+      const rows: Body[] = [];
+      await new Promise<void>((resolve, reject) => {
+        Readable.from(req.file!.buffer)
+          .pipe(csv({ mapHeaders: ({ header }) => header.trim().replace(/^﻿/, "") }))
+          .on("data", (row: Body) => rows.push(row))
+          .on("end", resolve)
+          .on("error", reject);
+      });
+      if (rows.length === 0) throw new HttpError(400, "The CSV file has no data rows.");
+      if (rows.length > 5000) throw new HttpError(400, "CSV imports are limited to 5000 rows.");
 
-    const rows: Body[] = [];
-    await new Promise<void>((resolve, reject) => {
-      Readable.from(req.file!.buffer)
-        .pipe(csv({ mapHeaders: ({ header }) => header.trim().replace(/^﻿/, "") }))
-        .on("data", (row: Body) => rows.push(row))
-        .on("end", resolve)
-        .on("error", reject);
-    });
-    if (rows.length === 0) throw new HttpError(400, "The CSV file has no data rows.");
-    if (rows.length > 5000) throw new HttpError(400, "CSV imports are limited to 5000 rows.");
-
-    db.transaction(() => {
+      // Validate every row first, then write the whole file in one transaction.
+      const refs = await loadRefs();
+      const stmts: Stmt[] = [];
       rows.forEach((row, i) => {
         try {
-          if (type === "subjects") {
-            const id = Number(insert.subjects(parse.subjects(row)));
-            setSubjectFaculty(id, optionalFacultyId(row));
-          } else {
-            // Each parser/insert pair is matched by key.
-            (insert[type] as (v: unknown) => unknown)(parse[type](row));
-          }
+          stmts.push(parse[type](row, refs).insert);
+          if (type === "subjects") stmts.push(...linkNewSubject(optionalFacultyId(row, refs)));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           throw new HttpError(400, `Row ${i + 2}: ${msg}`); // +2: header line and 1-based numbering
         }
       });
-    })();
-    res.json({ success: true, count: rows.length });
-  };
+      await db.batch(stmts);
+      res.json({ success: true, count: rows.length });
+    }),
+  );
 
   // ---------- scheduling ----------
 
-  app.post("/api/generate", (req, res) => {
-    const body = req.body ?? {};
-    const current = settings();
-    const workingDays = body.workingDays ?? current.workingDays;
-    if (
-      !Array.isArray(workingDays) ||
-      workingDays.length === 0 ||
-      workingDays.some((d) => !(ALL_DAYS as readonly string[]).includes(d)) ||
-      new Set(workingDays).size !== workingDays.length
-    ) {
-      throw new HttpError(400, `workingDays must be a non-empty list of distinct days from: ${ALL_DAYS.join(", ")}.`);
-    }
-    const periodsPerDay =
-      body.periodsPerDay === undefined ? current.periodsPerDay : int(body, "periodsPerDay", "Periods per day", 1, MAX_PERIODS_PER_DAY);
-    const days = ALL_DAYS.filter((d) => workingDays.includes(d));
+  app.post(
+    "/api/generate",
+    route(async (req, res) => {
+      const body = req.body ?? {};
+      const current = await settings();
+      const workingDays = body.workingDays ?? current.workingDays;
+      if (
+        !Array.isArray(workingDays) ||
+        workingDays.length === 0 ||
+        workingDays.some((d) => !(ALL_DAYS as readonly string[]).includes(d)) ||
+        new Set(workingDays).size !== workingDays.length
+      ) {
+        throw new HttpError(400, `workingDays must be a non-empty list of distinct days from: ${ALL_DAYS.join(", ")}.`);
+      }
+      const periodsPerDay =
+        body.periodsPerDay === undefined
+          ? current.periodsPerDay
+          : int(body, "periodsPerDay", "Periods per day", 1, MAX_PERIODS_PER_DAY);
+      const days = ALL_DAYS.filter((d) => workingDays.includes(d));
 
-    const d = loadAll();
-    const { entries, unscheduled } = generateTimetable({
-      classes: d.classes,
-      subjects: d.subjects,
-      rooms: d.rooms,
-      facultySubjects: d.faculty_subjects,
-      availability: d.faculty_availability,
-      workingDays: days,
-      periodsPerDay,
-    });
+      const d = await loadAll();
+      const { entries, unscheduled } = generateTimetable({
+        classes: d.classes,
+        subjects: d.subjects,
+        rooms: d.rooms,
+        facultySubjects: d.faculty_subjects,
+        availability: d.faculty_availability,
+        workingDays: days,
+        periodsPerDay,
+      });
 
-    const stmt = db.prepare(
-      "INSERT INTO timetable_entries (class_id, subject_id, faculty_id, room_id, day, period) VALUES (?, ?, ?, ?, ?, ?)",
-    );
-    db.transaction(() => {
-      db.prepare("DELETE FROM timetable_entries").run();
-      for (const e of entries) stmt.run(e.class_id, e.subject_id, e.faculty_id, e.room_id, e.day, e.period);
-      setMeta("schedule_settings", JSON.stringify({ workingDays: days, periodsPerDay }));
-      setMeta("last_generated_at", new Date().toISOString());
-    })();
+      await db.batch([
+        { sql: "DELETE FROM timetable_entries" },
+        ...entries.map((e) => ({
+          sql: "INSERT INTO timetable_entries (class_id, subject_id, faculty_id, room_id, day, period) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [e.class_id, e.subject_id, e.faculty_id, e.room_id, e.day, e.period],
+        })),
+        setMeta("schedule_settings", JSON.stringify({ workingDays: days, periodsPerDay })),
+        setMeta("last_generated_at", new Date().toISOString()),
+      ]);
 
-    res.json({ success: true, count: entries.length, unscheduled, conflicts: conflictsFor(loadAll()) });
-  });
+      res.json({ success: true, count: entries.length, unscheduled, conflicts: conflictsFor(await loadAll()) });
+    }),
+  );
 
   app.use("/api", (_req, _res, next) => next(new HttpError(404, "Not found.")));
 

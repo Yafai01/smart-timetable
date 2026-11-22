@@ -1,16 +1,34 @@
 // Vercel serverless entry point. Vercel serves the Vite client build from
 // dist/client as static files and routes every /api/* request here.
-import os from "os";
-import path from "path";
+import type { IncomingMessage, ServerResponse } from "http";
+import type { Express } from "express";
 import { createApp } from "../server/app.js";
-import { openDatabase } from "../server/db.js";
+import { databaseConfigFromEnv, openDatabase, tempDatabasePath } from "../server/db.js";
 
-// The deployment filesystem is read-only apart from the OS temp directory.
-// The database there lives only as long as the function instance, so data
-// resets on cold starts unless DATABASE_PATH points somewhere persistent.
-const DATABASE_PATH = process.env.DATABASE_PATH || path.join(os.tmpdir(), "timetable.db");
+// With TURSO_DATABASE_URL / TURSO_AUTH_TOKEN set, data lives in Turso and
+// persists. Without them, the database falls back to the function's temp
+// directory: fine for a demo, but it resets whenever an instance starts cold.
 const SEED = process.env.SEED_SAMPLE_DATA !== "false";
 
-const app = createApp(openDatabase(DATABASE_PATH, { seed: SEED }));
+let app: Promise<Express> | undefined;
 
-export default app;
+function getApp() {
+  app ??= openDatabase(databaseConfigFromEnv(process.env, tempDatabasePath()), { seed: SEED })
+    .then(createApp)
+    .catch((err) => {
+      app = undefined; // retry on the next request instead of caching the failure
+      throw err;
+    });
+  return app;
+}
+
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
+  try {
+    (await getApp())(req, res);
+  } catch (err) {
+    console.error(err);
+    res.statusCode = 500;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: "Database unavailable." }));
+  }
+}

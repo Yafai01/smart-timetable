@@ -4,14 +4,14 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createApp } from "./server/app.js";
-import { openDatabase } from "./server/db.js";
+import { databaseConfigFromEnv, openDatabase } from "./server/db.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3001;
 const HOST = process.env.HOST || "0.0.0.0";
-const DATABASE_PATH = process.env.DATABASE_PATH || path.resolve("timetable.db");
+const DATABASE = databaseConfigFromEnv(process.env, "timetable.db");
 const SEED = process.env.SEED_SAMPLE_DATA !== "false";
 
 // The compiled server (dist/server.js) always serves the production build;
@@ -20,7 +20,7 @@ const isCompiled = __filename.endsWith(".js");
 const isProduction = isCompiled || process.env.NODE_ENV === "production";
 
 async function main() {
-  const db = openDatabase(DATABASE_PATH, { seed: SEED });
+  const db = await openDatabase(DATABASE, { seed: SEED });
   const app = createApp(db);
 
   if (isProduction) {
@@ -41,7 +41,7 @@ async function main() {
 
   app.listen(PORT, HOST, () => {
     console.log(`Smart Timetable running on http://localhost:${PORT} (${isProduction ? "production" : "development"})`);
-    console.log(`Database: ${DATABASE_PATH}`);
+    console.log(`Database: ${DATABASE.url.split("?")[0]}`);
   });
 }
 

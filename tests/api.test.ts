@@ -9,8 +9,8 @@ import { openDatabase, type DB } from "../server/db";
 let db: DB;
 let app: ReturnType<typeof createApp>;
 
-beforeEach(() => {
-  db = openDatabase(":memory:", { seed: true });
+beforeEach(async () => {
+  db = await openDatabase(":memory:", { seed: true });
   app = createApp(db);
 });
 
@@ -23,25 +23,29 @@ describe("database bootstrap", () => {
     expect(d.rooms).toHaveLength(3);
   });
 
-  it("does not re-seed rows the user deleted after a restart", () => {
+  it("does not re-seed rows the user deleted after a restart", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "timetable-"));
     const file = path.join(dir, "test.db");
     try {
-      const first = openDatabase(file);
-      first.prepare("DELETE FROM faculty_subjects WHERE subject_id = 3").run();
-      first.prepare("DELETE FROM subjects WHERE id = 3").run();
+      const first = await openDatabase(file);
+      await first.run("DELETE FROM faculty_subjects WHERE subject_id = 3");
+      await first.run("DELETE FROM subjects WHERE id = 3");
       first.close();
-      const second = openDatabase(file);
-      expect(second.prepare("SELECT 1 FROM subjects WHERE id = 3").get()).toBeUndefined();
-      expect((second.prepare("SELECT COUNT(*) AS n FROM subjects").get() as { n: number }).n).toBe(3);
+      const second = await openDatabase(file);
+      expect(await second.get("SELECT 1 FROM subjects WHERE id = 3")).toBeUndefined();
+      expect((await second.get<{ n: number }>("SELECT COUNT(*) AS n FROM subjects"))!.n).toBe(3);
       second.close();
     } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
+      try {
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      } catch {
+        // Windows can keep the file locked briefly after close; a stray temp dir is harmless.
+      }
     }
   });
 
   it("can start empty", async () => {
-    const empty = createApp(openDatabase(":memory:", { seed: false }));
+    const empty = createApp(await openDatabase(":memory:", { seed: false }));
     const res = await request(empty).get("/api/data").expect(200);
     expect(res.body.departments).toEqual([]);
   });
@@ -178,6 +182,16 @@ describe("availability and CSV import", () => {
     const res = await request(app).post("/api/upload/rooms").attach("file", Buffer.from(bad), "rooms.csv").expect(400);
     expect(res.body.error).toMatch(/Row 3/);
     expect((await data()).rooms).toHaveLength(5);
+  });
+
+  it("imports subjects with their teachers", async () => {
+    const csvText = "name,code,periods_per_week,is_lab,dept_id,faculty_id\nCompilers,CS301,3,0,1,2\nOS Lab,CS302L,2,1,1,\n";
+    await request(app).post("/api/upload/subjects").attach("file", Buffer.from(csvText), "subjects.csv").expect(200);
+    const d = await data();
+    const compilers = d.subjects.find((s: { code: string }) => s.code === "CS301");
+    const osLab = d.subjects.find((s: { code: string }) => s.code === "CS302L");
+    expect(d.faculty_subjects).toContainEqual({ faculty_id: 2, subject_id: compilers.id });
+    expect(d.faculty_subjects.some((x: { subject_id: number }) => x.subject_id === osLab.id)).toBe(false);
   });
 
   it("rejects unknown import types", async () => {

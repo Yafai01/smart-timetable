@@ -30,7 +30,7 @@ You enter (or import from CSV) the departments, teachers, subjects, classes and 
 
 ## Tech stack
 
-- **Server:** Node.js, Express 4, better-sqlite3 (SQLite), multer and csv-parser for CSV import
+- **Server:** Node.js, Express 4, libSQL (`@libsql/client`: a local SQLite file, or Turso in production), multer and csv-parser for CSV import
 - **Client:** React 19, Vite 6, Tailwind CSS 4, lucide-react icons
 - **Tooling:** TypeScript, Vitest and Supertest
 
@@ -52,10 +52,8 @@ tests/               Scheduler and API tests
 
 ## Prerequisites
 
-- Node.js 24 (pinned in `package.json`; `better-sqlite3` does not support Node 26 yet)
+- Node.js 24 (pinned in `package.json`)
 - npm
-
-`better-sqlite3` ships prebuilt binaries for common platforms. On other platforms it needs a C/C++ toolchain to compile.
 
 ## Setup
 
@@ -75,10 +73,12 @@ On first start the server creates `timetable.db` and fills it with a small set o
 | --- | --- | --- |
 | `PORT` | `3001` | HTTP port. Most hosting platforms set this automatically. |
 | `HOST` | `0.0.0.0` | Interface to bind to. |
-| `DATABASE_PATH` | `./timetable.db` | SQLite database file. It is created automatically. |
+| `DATABASE_PATH` | `./timetable.db` | Local SQLite database file. It is created automatically. Ignored when a database URL is set. |
+| `TURSO_DATABASE_URL` / `DATABASE_URL` | | libSQL URL of a hosted database, such as `libsql://<db>-<org>.turso.io`. Takes precedence over `DATABASE_PATH`. |
+| `TURSO_AUTH_TOKEN` / `DATABASE_AUTH_TOKEN` | | Auth token for the hosted database. |
 | `SEED_SAMPLE_DATA` | `true` | Set to `false` to start with an empty database. This only has an effect on first run. |
 
-No API keys or secrets are required.
+No API keys or secrets are required to run locally.
 
 ## Scripts
 
@@ -120,4 +120,9 @@ Live demo: https://smart-timetable-brown.vercel.app
 
 `vercel.json` builds the client with `vite build`, serves `dist/client` as static files and sends every `/api/*` request to `api/index.ts`, which wraps the same Express app. Pushes to `main` deploy to production automatically.
 
-Vercel functions have a read-only file system, so the database is created in the OS temp directory and filled with sample data. **That data is not persistent.** It resets when a function instance starts cold, and separate instances do not share it. This is fine for a demo. For real use, deploy to a host with a persistent disk (see above) or move the database to a hosted service.
+Vercel functions have a read-only file system, so persistent data needs a hosted database. The app uses [Turso](https://turso.tech) (hosted SQLite, same SQL):
+
+1. In the Vercel dashboard, open the project, go to **Storage** and connect a **Turso** database. This sets `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` for the project. Alternatively, create the database with the Turso CLI and add the two variables yourself.
+2. Redeploy. On the first request the app creates the tables and loads the sample data once.
+
+Without those variables the app still runs, but it falls back to a database in the function's temp directory. That data resets when an instance starts cold, and separate instances do not share it.

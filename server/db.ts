@@ -1,8 +1,30 @@
-import Database from "better-sqlite3";
+import { createClient, type Client, type InValue, type ResultSet } from "@libsql/client";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
-export type DB = Database.Database;
+export interface Stmt {
+  sql: string;
+  args?: InValue[];
+}
+
+export interface RunResult {
+  changes: number;
+  lastInsertRowid: number;
+}
+
+/**
+ * Small async wrapper over a libSQL client. The same code talks to a local
+ * SQLite file (development, tests) or to a hosted Turso database (Vercel).
+ */
+export interface DB {
+  get<T>(sql: string, args?: InValue[]): Promise<T | undefined>;
+  all<T>(sql: string, args?: InValue[]): Promise<T[]>;
+  run(sql: string, args?: InValue[]): Promise<RunResult>;
+  /** Runs every statement in one transaction: all apply or none do. */
+  batch(stmts: Stmt[]): Promise<RunResult[]>;
+  close(): void;
+}
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS departments (
@@ -107,33 +129,95 @@ const SAMPLE_DATA = `
   INSERT INTO faculty_subjects (faculty_id, subject_id) VALUES (1, 1), (1, 3), (2, 2), (3, 4);
 `;
 
+export interface DatabaseConfig {
+  /** libSQL URL: `file:path/to.db`, `:memory:`, or `libsql://…` for Turso. */
+  url: string;
+  authToken?: string;
+}
+
 export interface OpenOptions {
   /** Insert sample departments, faculty, subjects, classes and rooms on first run. */
   seed?: boolean;
 }
 
 /**
- * Opens (or creates) the SQLite database, applies the schema and, on first
+ * Chooses the database from the environment:
+ * 1. TURSO_DATABASE_URL (+ TURSO_AUTH_TOKEN), or DATABASE_URL (+ DATABASE_AUTH_TOKEN)
+ * 2. DATABASE_PATH, a local SQLite file
+ * 3. `fallbackPath`
+ */
+export function databaseConfigFromEnv(env: NodeJS.ProcessEnv, fallbackPath: string): DatabaseConfig {
+  const url = env.TURSO_DATABASE_URL || env.DATABASE_URL;
+  if (url) return { url, authToken: env.TURSO_AUTH_TOKEN || env.DATABASE_AUTH_TOKEN || undefined };
+  return { url: `file:${path.resolve(env.DATABASE_PATH || fallbackPath)}` };
+}
+
+/** A file in the OS temp directory: the only writable place on serverless hosts. */
+export const tempDatabasePath = () => path.join(os.tmpdir(), "timetable.db");
+
+const toRun = (rs: ResultSet): RunResult => ({
+  changes: rs.rowsAffected,
+  lastInsertRowid: rs.lastInsertRowid === undefined ? 0 : Number(rs.lastInsertRowid),
+});
+
+/** libSQL rows are array-like; turn them into plain objects keyed by column. */
+const toObjects = <T>(rs: ResultSet): T[] =>
+  rs.rows.map((row) => Object.fromEntries(rs.columns.map((c, i) => [c, row[i]])) as T);
+
+const splitStatements = (sql: string): Stmt[] =>
+  sql
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => ({ sql: s }));
+
+function wrap(client: Client): DB {
+  return {
+    async get<T>(sql: string, args: InValue[] = []) {
+      return toObjects<T>(await client.execute({ sql, args }))[0];
+    },
+    async all<T>(sql: string, args: InValue[] = []) {
+      return toObjects<T>(await client.execute({ sql, args }));
+    },
+    async run(sql: string, args: InValue[] = []) {
+      return toRun(await client.execute({ sql, args }));
+    },
+    async batch(stmts: Stmt[]) {
+      if (stmts.length === 0) return [];
+      return (await client.batch(stmts.map((s) => ({ sql: s.sql, args: s.args ?? [] })), "write")).map(toRun);
+    },
+    close: () => client.close(),
+  };
+}
+
+/**
+ * Opens (or creates) the database, applies the schema and, on first
  * initialisation only, inserts sample data. Deleted sample rows therefore stay
  * deleted across restarts.
  */
-export function openDatabase(file: string, { seed = true }: OpenOptions = {}): DB {
-  if (file !== ":memory:") {
-    fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+export async function openDatabase(config: DatabaseConfig | string, { seed = true }: OpenOptions = {}): Promise<DB> {
+  const cfg = typeof config === "string" ? { url: config === ":memory:" ? ":memory:" : `file:${path.resolve(config)}` } : config;
+  if (cfg.url.startsWith("file:")) {
+    fs.mkdirSync(path.dirname(cfg.url.slice("file:".length)), { recursive: true });
   }
-  const db = new Database(file);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  db.exec(SCHEMA);
+  const client = createClient({ url: cfg.url, authToken: cfg.authToken });
+  const db = wrap(client);
+  if (cfg.url.startsWith("file:")) await client.execute("PRAGMA journal_mode = WAL");
+  await client.batch(splitStatements(SCHEMA), "write");
 
-  const initialised = db.prepare("SELECT value FROM meta WHERE key = 'initialised'").get();
-  if (!initialised) {
-    db.transaction(() => {
-      const hasData = db.prepare("SELECT 1 FROM departments LIMIT 1").get();
-      // Databases created by earlier versions already contain data: never re-seed them.
-      if (seed && !hasData) db.exec(SAMPLE_DATA);
-      db.prepare("INSERT INTO meta (key, value) VALUES ('initialised', ?)").run(new Date().toISOString());
-    })();
+  if (!(await db.get("SELECT value FROM meta WHERE key = 'initialised'"))) {
+    // Databases created by earlier versions already contain data: never re-seed them.
+    const hasData = await db.get("SELECT 1 FROM departments LIMIT 1");
+    try {
+      // The meta row goes first: if another instance initialised the database
+      // in the meantime, its primary key clashes and the whole batch rolls back.
+      await db.batch([
+        { sql: "INSERT INTO meta (key, value) VALUES ('initialised', ?)", args: [new Date().toISOString()] },
+        ...(seed && !hasData ? splitStatements(SAMPLE_DATA) : []),
+      ]);
+    } catch (err) {
+      if (!(await db.get("SELECT value FROM meta WHERE key = 'initialised'"))) throw err;
+    }
   }
   return db;
 }
