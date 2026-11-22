@@ -1,93 +1,123 @@
-# Smart Timetable Pro
+# Smart Timetable
 
-A college timetable generator with a React dashboard and an Express + SQLite backend. You enter departments, faculty, subjects, classes and rooms, mark when faculty are available, and the server builds a weekly timetable with a greedy scheduler. It then reports any conflicts or unmet requirements it finds.
+A self-hosted web app that generates conflict-free weekly timetables for a college from its departments, faculty, subjects, classes and rooms.
 
-![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)
-![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
-![SQLite](https://img.shields.io/badge/SQLite-better--sqlite3-003B57?logo=sqlite&logoColor=white)
+## What it does
+
+You enter (or import from CSV) the departments, teachers, subjects, classes and rooms of an institution, mark the periods when individual teachers are unavailable, and generate a weekly timetable. The generator places every subject for every class into free periods without double-booking a teacher, a room or a class. It also respects room capacity, lab/theory room types and teacher availability. A conflict checker then reports anything the timetable still gets wrong, including unmet weekly periods. These problems can also appear when data is edited after generation, for example when a room is made smaller.
 
 ## Features
 
-- **Master data management**: add departments, faculty, subjects (with periods per week and a lab flag), classes (with student count) and rooms (with capacity and a lab flag).
-- **Bulk CSV import**: upload CSV files for departments, faculty, subjects, classes and rooms.
-- **Faculty availability**: mark each faculty member as available or unavailable for every day and period.
-- **Automatic timetable generation**: a greedy scheduler fills a Monday to Saturday week with 6 periods per day for every class. It respects:
-  - faculty, room and class double-booking,
-  - faculty availability,
-  - lab and theory room types,
-  - room capacity against class size.
-- **Conflict detection**: flags faculty, room and class double-bookings, rooms too small for a class, and subjects that got fewer periods than they need.
-- **Timetable viewer**: shows the generated weekly grid for each class.
-- **Seed data**: a sample dataset is inserted on first run so the app works straight away.
-- **Faculty-subject assignment**: the API links faculty to subjects. Seed data includes these links, and the scheduler uses the first faculty member assigned to each subject.
+- Create, edit and delete departments, faculty, subjects, classes and rooms, with server-side validation.
+- Assign a teacher to each subject.
+- CSV import for every entity. An import is all-or-nothing: if any row is invalid, the whole file is rejected and the error names the row.
+- Per-teacher weekly availability grid.
+- Configurable working days (Monday to Saturday) and periods per day (1 to 10).
+- Greedy timetable generator that uses the smallest suitable room for each period.
+- Conflict report covering teacher, room and class double bookings, capacity problems, room-type mismatches, availability violations and unmet weekly periods.
+- Timetable views by class, by teacher or by room.
+- Print or save as PDF for one timetable or for all classes. This uses the browser's print dialog with a dedicated print stylesheet.
+- Dashboard figures computed from your data: periods scheduled compared with periods required, room utilisation, and teacher workload.
+
+## Limitations
+
+- **No authentication.** Anyone who can reach the server can read and change the data. Run it on a trusted network or behind an authenticating reverse proxy.
+- The generator is greedy, not an optimiser. It fills the earliest free periods first, so it does not spread a subject evenly across the week. When it cannot place a period, it reports the period as an unmet requirement and does not backtrack.
+- Every class takes every subject of its department. Electives and cross-department subjects are not modelled.
+- Each subject has one assigned teacher in the UI. The API and the generator accept several teachers per subject.
+- Periods have no clock times.
+- PDF export relies on the browser's "Save as PDF" print destination.
 
 ## Tech stack
 
-- **Frontend**: React 19, TypeScript, Vite 6, Tailwind CSS 4, Motion, Lucide icons
-- **Backend**: Node.js, Express 4, better-sqlite3, Multer and csv-parser for CSV uploads
-- **Dev server**: `tsx` runs `server.ts`, with Vite mounted as middleware
-
-## Getting started
-
-### Prerequisites
-
-- Node.js 18 or newer
-- npm
-
-### Install and run
-
-```bash
-npm install
-npm run dev
-```
-
-Then open http://localhost:3001.
-
-The SQLite database (`timetable.db`) is created in the working directory on first start and filled with sample data. CSV uploads are stored briefly in `uploads/`.
-
-### Production build
-
-```bash
-npm run build                          # vite build + tsc -> dist/
-NODE_ENV=production npm start          # node dist/server.js
-```
-
-### Environment variables
-
-`.env.example` comes from the AI Studio template and lists `GEMINI_API_KEY` and `APP_URL`. The current code doesn't use either one, so the app runs without a `.env` file.
-
-## CSV format
-
-Each upload expects a header row with these columns:
-
-| Type        | Columns                                         |
-|-------------|-------------------------------------------------|
-| departments | `name`                                          |
-| faculty     | `name, email, dept_id`                          |
-| subjects    | `name, code, periods_per_week, is_lab, dept_id` |
-| classes     | `name, dept_id`                                 |
-| rooms       | `name, capacity, is_lab`                        |
-
-`is_lab` accepts `true` or `1`.
+- **Server:** Node.js, Express 4, better-sqlite3 (SQLite), multer and csv-parser for CSV import
+- **Client:** React 19, Vite 6, Tailwind CSS 4, lucide-react icons
+- **Tooling:** TypeScript, Vitest and Supertest
 
 ## Project structure
 
 ```
-server.ts        Express API, SQLite schema/seed, scheduler, conflict detection
-src/App.tsx      Dashboard, data managers, availability grid, timetable viewer
-src/main.tsx     React entry point
-vite.config.ts   Vite + Tailwind configuration
-tsconfig.json    Server compile settings (outputs to dist/)
+server.ts            Entry point: env config, Vite dev middleware or static client build
+api/index.ts         Vercel serverless entry point (wraps the same Express app)
+server/
+  app.ts             Express app and REST API (validation, CRUD, CSV import, generation)
+  db.ts              SQLite schema, first-run initialisation and sample data
+  scheduler.ts       Timetable generator and conflict detection (pure functions)
+src/
+  App.tsx            Layout, navigation, data loading
+  pages/             Dashboard, Departments, Faculty, Availability, Subjects, Classes, Rooms, Timetables
+  ui.tsx             Shared UI components (buttons, fields, tables, toasts, confirm dialog)
+tests/               Scheduler and API tests
 ```
 
-## API overview
+## Prerequisites
 
-| Method | Endpoint                     | Purpose                                                     |
-|--------|------------------------------|-------------------------------------------------------------|
-| GET    | `/api/data`                  | Return all entities, the current timetable and its conflicts |
-| POST   | `/api/departments`, `/api/faculty`, `/api/subjects`, `/api/classes`, `/api/rooms` | Create records |
-| POST   | `/api/faculty-availability`  | Set availability for a faculty member, day and period       |
-| POST   | `/api/assign-faculty`        | Link a faculty member to a subject                          |
-| POST   | `/api/upload/:type`          | Bulk import from CSV                                        |
-| POST   | `/api/generate`              | Generate a timetable (`workingDays`, `periodsPerDay`)       |
+- Node.js 24 (pinned in `package.json`; `better-sqlite3` does not support Node 26 yet)
+- npm
+
+`better-sqlite3` ships prebuilt binaries for common platforms. On other platforms it needs a C/C++ toolchain to compile.
+
+## Setup
+
+```bash
+npm install
+cp .env.example .env   # optional
+npm run dev
+```
+
+Open http://localhost:3001.
+
+On first start the server creates `timetable.db` and fills it with a small set of sample data. Sample data is inserted only once, so rows you delete do not reappear after a restart. To start with an empty database, set `SEED_SAMPLE_DATA=false` before the first run. The database file is git-ignored.
+
+## Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `3001` | HTTP port. Most hosting platforms set this automatically. |
+| `HOST` | `0.0.0.0` | Interface to bind to. |
+| `DATABASE_PATH` | `./timetable.db` | SQLite database file. It is created automatically. |
+| `SEED_SAMPLE_DATA` | `true` | Set to `false` to start with an empty database. This only has an effect on first run. |
+
+No API keys or secrets are required.
+
+## Scripts
+
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Starts the server with Vite middleware and hot reload. |
+| `npm run build` | Builds the client to `dist/client` and compiles the server to `dist/`. |
+| `npm start` | Runs the production build (`node dist/server.js`). In this mode the server serves only `dist/client`. |
+| `npm run lint` | Type-checks the client, the tests and the server. |
+| `npm test` | Runs the scheduler and API tests. |
+
+## CSV import format
+
+Each import expects a header row. Departments, faculty, subjects and classes refer to departments by numeric `dept_id`.
+
+| Entity | Columns |
+| --- | --- |
+| Departments | `name` |
+| Faculty | `name, email, dept_id` |
+| Subjects | `name, code, periods_per_week, is_lab, dept_id, faculty_id` (`faculty_id` is optional) |
+| Classes | `name, dept_id, student_count` |
+| Rooms | `name, capacity, is_lab` |
+
+In the `is_lab` column, `1` or `true` means a lab.
+
+## Deployment
+
+```bash
+npm ci
+npm run build
+npm start
+```
+
+The database is a single SQLite file. Point `DATABASE_PATH` at persistent storage, such as a mounted disk, because ephemeral container file systems lose data on redeploy.
+
+### Vercel
+
+Live demo: https://smart-timetable-brown.vercel.app
+
+`vercel.json` builds the client with `vite build`, serves `dist/client` as static files and sends every `/api/*` request to `api/index.ts`, which wraps the same Express app. Pushes to `main` deploy to production automatically.
+
+Vercel functions have a read-only file system, so the database is created in the OS temp directory and filled with sample data. **That data is not persistent.** It resets when a function instance starts cold, and separate instances do not share it. This is fine for a demo. For real use, deploy to a host with a persistent disk (see above) or move the database to a hosted service.
